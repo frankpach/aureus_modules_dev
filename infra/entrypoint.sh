@@ -15,24 +15,23 @@ mkdir -p storage framework cache bootstrap/cache
 mkdir -p storage/app storage/framework/{cache,views,sessions} storage/logs
 chown -R www-data:www-data storage bootstrap/cache
 
-# 3) Composer install (controlado por flags)
-#   COMPOSER_INSTALL=1 para ejecutar
-#   COMPOSER_NO_DEV=1 en producción
+# 3) Composer install
 if [ "${COMPOSER_INSTALL}" = "1" ]; then
   echo "[entrypoint] Ejecutando composer install..."
+  export COMPOSER_ALLOW_SUPERUSER=1
+  export COMPOSER_MEMORY_LIMIT=-1
   if [ "${COMPOSER_NO_DEV}" = "1" ]; then
-    sudo -u www-data COMPOSER_ALLOW_SUPERUSER=1 composer install --no-dev --prefer-dist --no-progress --no-interaction --optimize-autoloader
+    composer install --no-dev --prefer-dist --no-progress --no-interaction --optimize-autoloader
   else
-    sudo -u www-data COMPOSER_ALLOW_SUPERUSER=1 composer install --prefer-dist --no-progress --no-interaction
+    composer install --prefer-dist --no-progress --no-interaction
   fi
 fi
 
-# 4) NPM build opcional (para prod); requiere package.json en el volumen
-#   NODE_BUILD=1 para ejecutar
+# 4) NPM build opcional
 if [ "${NODE_BUILD}" = "1" ] && [ -f "package.json" ]; then
   echo "[entrypoint] Construyendo assets..."
-  sudo -u www-data npm ci || sudo -u www-data npm install
-  sudo -u www-data npm run build || true
+  npm ci --unsafe-perm || npm install --unsafe-perm
+  npm run build || true
 fi
 
 # 5) Enlaces y optimización
