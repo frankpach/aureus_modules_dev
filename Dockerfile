@@ -104,10 +104,14 @@ file_put_contents(".env",$env);
 # Esperar DB si está configurada
 if [ -n "${DB_HOST:-}" ]; then
   echo "Waiting for DB ${DB_HOST}:${DB_PORT:-5432}..."
-  for i in {1..90}; do
-    php -r 'try{$c=new PDO("pgsql:host=".getenv("DB_HOST").";port=".getenv("DB_PORT").";dbname=".getenv("DB_DATABASE"), getenv("DB_USERNAME"), getenv("DB_PASSWORD")); exit(0);}catch(Exception $e){exit(1);}'; \
-    && break || sleep 2
-  done || echo "DB not reachable, continuing..."
+  for i in $(seq 1 90); do
+    if php -r 'try{$c=new PDO("pgsql:host=".getenv("DB_HOST").";port=".getenv("DB_PORT").";dbname=".getenv("DB_DATABASE"), getenv("DB_USERNAME"), getenv("DB_PASSWORD")); exit(0);}catch(Exception $e){exit(1);}'; then
+      echo "DB reachable."
+      break
+    else
+      sleep 2
+    fi
+  done
 fi
 
 # Preparación Laravel/Aureus (idempotente)
