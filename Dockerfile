@@ -1,62 +1,97 @@
-# ====== Base PHP-FPM con extensiones necesarias ======
-FROM php:8.2-fpm-bullseye
+# ------------------------------------------------------------------------------
+# Aureus ERP Runtime (Ubuntu 24.04 + Nginx + PHP-FPM 8.4 + Supervisor)
+# - SIN Node en runtime
+# - Código de la app montado en /var/www/aureus (volumen persistente de EasyPanel)
+# - Copia configs desde ./docker/*.*
+# ------------------------------------------------------------------------------
 
-# Args opcionales
-ARG NODE_MAJOR=20
-ARG DEBIAN_FRONTEND=noninteractive
+FROM ubuntu:24.04
 
-# Paquetes del sistema y extensiones PHP requeridas por Aureus (Laravel 11 + paquetes)
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    git curl unzip cron supervisor nginx \
-    libpq-dev libzip-dev libicu-dev libxml2-dev \
-    libpng-dev libjpeg-dev libwebp-dev libfreetype6-dev \
-    pkg-config ca-certificates gnupg \
-    && docker-php-ext-configure intl \
-    && docker-php-ext-configure gd --with-freetype --with-jpeg --with-webp \
-    && docker-php-ext-install -j$(nproc) pdo pdo_pgsql bcmath intl pcntl gd zip opcache
+# ------------------
+# Variables de entorno
+# ------------------
+ENV DEBIAN_FRONTEND=noninteractive \
+    TZ=Etc/UTC \
+    APP_DIR=/var/www/aureus \
+    PHP_VERSION=8.4 \
+    FPM_USER=www-data \
+    FPM_GROUP=www-data \
+    PHP_MEMORY_LIMIT=512M \
+    PHP_UPLOAD_MAX_FILESIZE=64M \
+    PHP_POST_MAX_SIZE=64M \
+    PHP_MAX_EXECUTION_TIME=120 \
+    PHP_OPCACHE_ENABLE=1 \
+    PHP_OPCACHE_VALIDATE_TIMESTAMPS=0 \
+    PHP_OPCACHE_MEMORY_CONSUMPTION=256 \
+    PHP_OPCACHE_MAX_ACCELERATED_FILES=20000
 
-# Redis (extensión PHP)
-RUN pecl install redis \
-    && docker-php-ext-enable redis
+# ------------------
+# Paquetes del sistema + PHP 8.4 (Ondřej Surý PPA) + Composer
+# ------------------
+RUN apt-get update && apt-get upgrade -y && \
+    apt-get install -y --no-install-recommends \
+      gnupg ca-certificates curl wget nano unzip git supervisor \
+      nginx \
+      software-properties-common lsb-release tzdata \
+      libzip4 zip \
+      libicu-dev \
+      libpng-dev libjpeg-turbo8-dev libfreetype6-dev libwebp-dev \
+      libpq-dev && \
+    add-apt-repository ppa:ondrej/php -y && apt-get update && \
+    apt-get install -y --no-install-recommends \
+      php8.4 php8.4-fpm php8.4-cli php8.4-common \
+      php8.4-xml php8.4-mbstring php8.4-curl php8.4-gd \
+      php8.4-intl php8.4-zip php8.4-bcmath php8.4-pgsql \
+      php8.4-readline php8.4-opcache php8.4-pcntl php8.4-redis && \
+    curl -sS https://getcomposer.org/installer -o /tmp/composer-setup.php && \
+    php /tmp/composer-setup.php --install-dir=/usr/local/bin --filename=composer && \
+    rm -f /tmp/composer-setup.php && \
+    apt-get autoremove -y && apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# Composer (desde imagen oficial)
-COPY --from=composer:2 /usr/bin/composer /usr/bin/composer
+# ------------------
+# Directorios y permisos básicos
+# ------------------
+RUN mkdir -p ${APP_DIR} /run/php /var/log/supervisor /var/cache/nginx && \
+    chown -R ${FPM_USER}:${FPM_GROUP} ${APP_DIR} /run/php /var/cache/nginx
 
-# NodeJS (para build de assets cuando se requiera)
-RUN curl -fsSL https://deb.nodesource.com/setup_${NODE_MAJOR}.x | bash - \
-    && apt-get install -y --no-install-recommends nodejs
+# ------------------
+# Nginx - eliminar default y copiar configuración del proyecto
+# ------------------
+RUN rm -f /etc/nginx/sites-enabled/default /etc/nginx/sites-available/default
+COPY docker/nginx.conf /etc/nginx/nginx.conf
+COPY docker/site.conf  /etc/nginx/conf.d/aureus.conf
 
-# Limpieza
-RUN rm -rf /var/lib/apt/lists/*
+# ------------------
+# PHP-FPM y overrides de PHP
+# ------------------
+COPY docker/php-fpm.conf /etc/php/8.4/fpm/pool.d/www.conf
+COPY docker/php.ini      /etc/php/8.4/fpm/conf.d/zzz-custom.ini
 
-# ====== Estructura y configs ======
-# Directorio de la app (código se montará como volumen)
-ENV APP_DIR=/var/www/aureus
-RUN mkdir -p ${APP_DIR}
-WORKDIR ${APP_DIR}
+# ------------------
+# Supervisor (Nginx + PHP-FPM)
+# ------------------
+COPY docker/supervisord.conf /etc/supervisor/conf.d/supervisord.conf
 
-# Nginx config
-RUN rm -f /etc/nginx/sites-enabled/default
-COPY ./infra/nginx.conf /etc/nginx/nginx.conf
-COPY ./infra/nginx-site.conf /etc/nginx/conf.d/aureus.conf
-
-# PHP-FPM tuning opcional
-COPY ./infra/php-fpm.ini /usr/local/etc/php/conf.d/zz-custom.ini
-
-# Supervisor: php-fpm, nginx, queue, scheduler
-COPY ./infra/supervisor.conf /etc/supervisor/conf.d/supervisor.conf
-
-# Entrypoint: instala dependencias, prepara .env, permisos, cachea y lanza procesos
-COPY ./infra/entrypoint.sh /usr/local/bin/entrypoint.sh
+# ------------------
+# Entrypoint (prepara .env, composer, caches; arranca supervisor)
+# ------------------
+COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
-# Permisos para Laravel
-RUN usermod -u 1000 www-data && groupmod -g 1000 www-data || true
-RUN chown -R www-data:www-data ${APP_DIR}
+# ------------------
+# Healthcheck simple (requiere curl)
+# ------------------
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+  CMD curl -fsS http://127.0.0.1:8080/health || exit 1
 
+# ------------------
+# Puerto, volumen y workdir
+# ------------------
 EXPOSE 8080
-HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=5 \
-  CMD curl -fsS http://127.0.0.1:8080/ || exit 1
+VOLUME ["/var/www/aureus"]
+WORKDIR ${APP_DIR}
 
+# ------------------
+# Lanzar entrypoint (no usar CMD; supervisor se lanza desde entrypoint)
+# ------------------
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
-CMD ["/usr/bin/supervisord","-c","/etc/supervisor/supervisord.conf","-n"]
