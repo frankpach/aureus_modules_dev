@@ -15,23 +15,18 @@ RUN set -eux; \
   git checkout -qf FETCH_HEAD
 
 # ========= 2) COMPOSER (vendor) =========
+# Usamos php-cli para que Composer valide ext-intl, ext-gd, ext-mbstring en build
 FROM php:8.3-cli AS vendor
 SHELL ["/bin/bash","-lc"]
-
-# Paquetes y extensiones necesarias para validar requisitos de Composer
 RUN apt-get update && apt-get install -y \
-    git unzip libzip-dev libpng-dev libjpeg-dev libfreetype6-dev libicu-dev \
- && docker-php-ext-configure gd --with-freetype --with-jpeg \
- && docker-php-ext-install -j"$(nproc)" zip intl gd \
- && rm -rf /var/lib/apt/lists/*
-
-# Instalar composer (binario) tomado de la imagen oficial
+      git unzip pkg-config libonig-dev \
+      libzip-dev libpng-dev libjpeg-dev libfreetype6-dev libicu-dev \
+  && docker-php-ext-configure gd --with-freetype --with-jpeg \
+  && docker-php-ext-install -j"$(nproc)" zip intl gd mbstring \
+  && rm -rf /var/lib/apt/lists/*
 COPY --from=composer:2 /usr/bin/composer /usr/bin/composer
-
 WORKDIR /app
 COPY --from=code /src ./
-
-# Instalar dependencias de producción (respeta lock)
 ENV COMPOSER_ALLOW_SUPERUSER=1
 RUN composer install --no-dev --prefer-dist --no-interaction --no-scripts --optimize-autoloader
 
@@ -47,26 +42,25 @@ RUN npm run build
 FROM php:8.3-apache
 SHELL ["/bin/bash","-lc"]
 
-# Parámetro: se sobreescribe por servicio (_prod / _dev)
 ARG APP_DIR=/var/www/html/code
 ENV APP_DIR=${APP_DIR}
 ENV APACHE_DOCUMENT_ROOT=${APP_DIR}/public
 ENV COMPOSER_ALLOW_SUPERUSER=1
 
-# Paquetes + extensiones PHP (incluye pgsql)
+# Paquetes + extensiones PHP necesarias (incluye pgsql, oniguruma para mbstring)
 RUN apt-get update && apt-get install -y \
-    git unzip curl libzip-dev libpng-dev libjpeg-dev libfreetype6-dev libicu-dev \
-    libpq-dev \
- && docker-php-ext-configure gd --with-freetype --with-jpeg \
- && docker-php-ext-install -j"$(nproc)" pdo_pgsql bcmath intl zip gd exif mbstring opcache \
- && pecl install redis \
- && docker-php-ext-enable redis \
- && a2enmod rewrite headers \
- && sed -ri -e 's!/var/www/html!${APACHE_DOCUMENT_ROOT}!g' \
-      /etc/apache2/sites-available/*.conf /etc/apache2/apache2.conf /etc/apache2/conf-available/*.conf \
- && rm -rf /var/lib/apt/lists/*
+      git unzip curl pkg-config libonig-dev \
+      libzip-dev libpng-dev libjpeg-dev libfreetype6-dev libicu-dev libpq-dev \
+  && docker-php-ext-configure gd --with-freetype --with-jpeg \
+  && docker-php-ext-install -j"$(nproc)" pdo_pgsql bcmath intl zip gd exif mbstring opcache \
+  && pecl install redis \
+  && docker-php-ext-enable redis \
+  && a2enmod rewrite headers \
+  && sed -ri -e 's!/var/www/html!${APACHE_DOCUMENT_ROOT}!g' \
+       /etc/apache2/sites-available/*.conf /etc/apache2/apache2.conf /etc/apache2/conf-available/*.conf \
+  && rm -rf /var/lib/apt/lists/*
 
-# Opcache recomendado (prod seguro)
+# Opcache (recomendado para prod)
 RUN printf "\nopcache.enable=1\nopcache.enable_cli=1\nopcache.validate_timestamps=0\nopcache.max_accelerated_files=20000\nopcache.memory_consumption=256\nopcache.interned_strings_buffer=16\n" > /usr/local/etc/php/conf.d/opcache-recommended.ini
 
 # Código + vendor + assets
@@ -83,10 +77,10 @@ set -e
 APP_DIR="${APP_DIR:-/var/www/html/code}"
 cd "$APP_DIR"
 
-# .env base
+# Si no existe .env, copiar base
 [ -f .env ] || cp .env.example .env
 
-# Sustituye variables críticas en .env (idempotente)
+# Inyectar/actualizar variables críticas desde env del contenedor
 php -r '
 $env = file_exists(".env") ? file_get_contents(".env") : "";
 function putenvline($k,$v){ global $env; $k=trim($k); $v=str_replace(["\n","\r"],"",$v); if(preg_match("/^$k=/m",$env)){ $env=preg_replace("/^$k=.*$/m","$k=$v",$env);} else { $env .= PHP_EOL."$k=$v";}}
@@ -123,7 +117,7 @@ php artisan storage:link || true
 php artisan migrate --force || true
 php artisan optimize || true
 
-# Instalación Aureus (opcional: crea admin/roles/datos iniciales)
+# Instalación Aureus (opcional)
 if [ "${AUREUS_AUTO_INSTALL:-false}" = "true" ]; then
   php artisan erp:install || true
 fi
