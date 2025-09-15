@@ -1,132 +1,43 @@
 version: "3.9"
 
 services:
-  postgres:
-    image: postgres:16
-    container_name: aureus_pg
-    environment:
-      POSTGRES_USER: aureus
-      POSTGRES_PASSWORD: aureus
-      POSTGRES_DB: aureus_init_placeholder
-    volumes:
-      - pgdata:/var/lib/postgresql/data
-      - ./db-init:/docker-entrypoint-initdb.d
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d postgres"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-
-  redis:
-    image: redis:7-alpine
-    container_name: aureus_redis
-    command: ["redis-server","--appendonly","yes"]
-    volumes:
-      - redisdata:/data
-    healthcheck:
-      test: ["CMD", "redis-cli","ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-
-  aureus_prod:
-    build:
-      context: .
-      dockerfile: ./Dockerfile
-      args:
-        # Puedes fijar una release/tag de Aureus ERP p.ej. v1.0.0
-        AUREUS_REF: master
-    image: aureus:latest
-    container_name: aureus_prod
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    environment:
-      APP_ENV: production
-      APP_DEBUG: "false"
-      APP_URL: https://tu-dominio-prod.com
-      DB_CONNECTION: pgsql
-      DB_HOST: postgres
-      DB_PORT: "5432"
-      DB_DATABASE: aureus_prod
-      DB_USERNAME: aureus
-      DB_PASSWORD: aureus
-      CACHE_DRIVER: redis
-      QUEUE_CONNECTION: redis
-      REDIS_HOST: redis
-      REDIS_PORT: "6379"
-      # Automatizaciones (opcional):
-      AUREUS_AUTO_INSTALL: "true"
-      RUN_QUEUE: "true"
-      RUN_SCHEDULE: "true"
-      # Directorio de app para separar persistencia
-      APP_DIR: /var/www/html/code
-    volumes:
-      # Persistencia por instancia (storage y cache)
-      - aureus_prod_storage:/var/www/html/code/storage
-      - aureus_prod_cache:/var/www/html/code/bootstrap/cache
-      # (Opcional) Monta plugins locales en prod (read-only ideal):
-      # - ./plugins:/var/www/html/code/plugins:ro
-    ports:
-      - "8080:80"
-    healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://localhost/ || exit 1"]
-      interval: 30s
-      timeout: 10s
-      retries: 5
-
   aureus_dev:
     build:
-      context: .
-      dockerfile: ./Dockerfile
+      context: .               # apunta a la carpeta donde está el Dockerfile
+      dockerfile: Dockerfile
       args:
-        # Para dev puedes seguir master o una rama feature
+        # opcional: tag/branch específica de Aureus
         AUREUS_REF: master
-    image: aureus:latest
-    container_name: aureus_dev
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
+    image: aureus-dev:latest
     environment:
       APP_ENV: local
       APP_DEBUG: "true"
-      APP_URL: http://localhost:8081
+      APP_URL: https://dev-erp.tu-dominio.com
+
       DB_CONNECTION: pgsql
-      DB_HOST: postgres
+      DB_HOST: 127.0.0.1       # o la IP privada del host/servidor de DB
       DB_PORT: "5432"
       DB_DATABASE: aureus_dev
       DB_USERNAME: aureus
-      DB_PASSWORD: aureus
+      DB_PASSWORD: ${DB_PASSWORD:?set_me}
+
       CACHE_DRIVER: redis
       QUEUE_CONNECTION: redis
-      REDIS_HOST: redis
+      REDIS_CLIENT: phpredis
+      REDIS_HOST: 127.0.0.1     # o IP privada del host/servidor de Redis
       REDIS_PORT: "6379"
+      # REDIS_PASSWORD: ${REDIS_PASSWORD}
+
       AUREUS_AUTO_INSTALL: "true"
-      RUN_QUEUE: "true"
-      RUN_SCHEDULE: "true"
-      # Directorio de app dev separado (si prefieres otro path, puedes sobreescribir APP_DIR en build; aquí lo dejamos igual)
-      APP_DIR: /var/www/html/code
+      RUN_QUEUE: "false"        # "true" si no usarás worker aparte
+      RUN_SCHEDULE: "false"     # "true" si no usarás worker aparte
     volumes:
       - aureus_dev_storage:/var/www/html/code/storage
       - aureus_dev_cache:/var/www/html/code/bootstrap/cache
-      # (Opcional) Monta plugins en caliente para desarrollo:
-      # - ./plugins:/var/www/html/code/plugins
     ports:
-      - "8081:80"
-    healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://localhost/ || exit 1"]
-      interval: 30s
-      timeout: 10s
-      retries: 5
+      - "8081:80"               # si no vas a usar dominio/HTTPS del panel
+    restart: unless-stopped
 
 volumes:
-  pgdata:
-  redisdata:
-  aureus_prod_storage:
-  aureus_prod_cache:
   aureus_dev_storage:
   aureus_dev_cache:

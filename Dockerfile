@@ -1,4 +1,4 @@
-# ========= 1) CÓDIGO =========
+# ========= 1) CÓDIGO (clona Aureus) =========
 FROM alpine/git:latest AS code
 ARG AUREUS_REPO=https://github.com/aureuserp/aureuserp.git
 ARG AUREUS_REF=master
@@ -14,8 +14,7 @@ RUN set -eux; \
   fi; \
   git checkout -qf FETCH_HEAD
 
-# ========= 2) COMPOSER (vendor) =========
-# Usamos php-cli para que Composer valide ext-intl, ext-gd, ext-mbstring en build
+# ========= 2) COMPOSER (instala vendor con extensiones) =========
 FROM php:8.3-cli AS vendor
 SHELL ["/bin/bash","-lc"]
 RUN apt-get update && apt-get install -y \
@@ -28,9 +27,10 @@ COPY --from=composer:2 /usr/bin/composer /usr/bin/composer
 WORKDIR /app
 COPY --from=code /src ./
 ENV COMPOSER_ALLOW_SUPERUSER=1
+# Respeta composer.lock si existe en repo
 RUN composer install --no-dev --prefer-dist --no-interaction --no-scripts --optimize-autoloader
 
-# ========= 3) ASSETS (Vite) =========
+# ========= 3) ASSETS (Vite build) =========
 FROM node:20 AS assets
 WORKDIR /app
 COPY --from=code /src/package*.json ./
@@ -42,12 +42,13 @@ RUN npm run build
 FROM php:8.3-apache
 SHELL ["/bin/bash","-lc"]
 
+# Paths y docroot
 ARG APP_DIR=/var/www/html/code
 ENV APP_DIR=${APP_DIR}
 ENV APACHE_DOCUMENT_ROOT=${APP_DIR}/public
 ENV COMPOSER_ALLOW_SUPERUSER=1
 
-# Paquetes + extensiones PHP necesarias (incluye pgsql, oniguruma para mbstring)
+# Extensiones requeridas por Laravel/Aureus + PGSQL + Redis
 RUN apt-get update && apt-get install -y \
       git unzip curl pkg-config libonig-dev \
       libzip-dev libpng-dev libjpeg-dev libfreetype6-dev libicu-dev libpq-dev \
@@ -60,7 +61,7 @@ RUN apt-get update && apt-get install -y \
        /etc/apache2/sites-available/*.conf /etc/apache2/apache2.conf /etc/apache2/conf-available/*.conf \
   && rm -rf /var/lib/apt/lists/*
 
-# Opcache (recomendado para prod)
+# Opcache (seguro en prod)
 RUN printf "\nopcache.enable=1\nopcache.enable_cli=1\nopcache.validate_timestamps=0\nopcache.max_accelerated_files=20000\nopcache.memory_consumption=256\nopcache.interned_strings_buffer=16\n" > /usr/local/etc/php/conf.d/opcache-recommended.ini
 
 # Código + vendor + assets
@@ -69,7 +70,7 @@ COPY --from=code   /src               ${APP_DIR}
 COPY --from=vendor /app/vendor        ${APP_DIR}/vendor
 COPY --from=assets /app/public/build  ${APP_DIR}/public/build
 
-# Entrypoint embebido
+# ===== Entrypoint (idempotente) =====
 RUN set -eux && cat > /usr/local/bin/entrypoint.sh <<'SCRIPT'
 #!/usr/bin/env bash
 set -e
@@ -80,26 +81,33 @@ cd "$APP_DIR"
 # Si no existe .env, copiar base
 [ -f .env ] || cp .env.example .env
 
-# Inyectar/actualizar variables críticas desde env del contenedor
+# Inyectar/actualizar variables desde entorno
 php -r '
 $env = file_exists(".env") ? file_get_contents(".env") : "";
 function putenvline($k,$v){ global $env; $k=trim($k); $v=str_replace(["\n","\r"],"",$v); if(preg_match("/^$k=/m",$env)){ $env=preg_replace("/^$k=.*$/m","$k=$v",$env);} else { $env .= PHP_EOL."$k=$v";}}
-$map=["APP_ENV"=>getenv("APP_ENV")?: "production",
-      "APP_URL"=>getenv("APP_URL")?: "http://localhost",
-      "APP_DEBUG"=>(getenv("APP_DEBUG")?: "false"),
-      "DB_CONNECTION"=>getenv("DB_CONNECTION")?: "pgsql",
-      "DB_HOST"=>getenv("DB_HOST")?: "postgres",
-      "DB_PORT"=>getenv("DB_PORT")?: "5432",
-      "DB_DATABASE"=>getenv("DB_DATABASE")?: "aureus",
-      "DB_USERNAME"=>getenv("DB_USERNAME")?: "aureus",
-      "DB_PASSWORD"=>getenv("DB_PASSWORD")?: "aureus",
-      "CACHE_DRIVER"=>getenv("CACHE_DRIVER")?: "redis",
-      "QUEUE_CONNECTION"=>getenv("QUEUE_CONNECTION")?: "redis",
-      "REDIS_HOST"=>getenv("REDIS_HOST")?: "redis",
-      "REDIS_PORT"=>getenv("REDIS_PORT")?: "6379"];
+$map=[
+ "APP_ENV"=>getenv("APP_ENV")?: "production",
+ "APP_URL"=>getenv("APP_URL")?: "http://localhost",
+ "APP_DEBUG"=>(getenv("APP_DEBUG")?: "false"),
+ "DB_CONNECTION"=>getenv("DB_CONNECTION")?: "pgsql",
+ "DB_HOST"=>getenv("DB_HOST")?: "127.0.0.1",
+ "DB_PORT"=>getenv("DB_PORT")?: "5432",
+ "DB_DATABASE"=>getenv("DB_DATABASE")?: "aureus",
+ "DB_USERNAME"=>getenv("DB_USERNAME")?: "aureus",
+ "DB_PASSWORD"=>getenv("DB_PASSWORD")?: "aureus",
+ "CACHE_DRIVER"=>getenv("CACHE_DRIVER")?: "redis",
+ "QUEUE_CONNECTION"=>getenv("QUEUE_CONNECTION")?: "redis",
+ "REDIS_CLIENT"=>getenv("REDIS_CLIENT")?: "phpredis",
+ "REDIS_HOST"=>getenv("REDIS_HOST")?: "127.0.0.1",
+ "REDIS_PORT"=>getenv("REDIS_PORT")?: "6379",
+ "REDIS_PASSWORD"=>getenv("REDIS_PASSWORD")?: ""
+];
 foreach($map as $k=>$v){ putenvline($k,$v); }
 file_put_contents(".env",$env);
 ';
+
+# Permisos (por si el volumen entra vacío)
+chown -R www-data:www-data storage bootstrap/cache || true
 
 # Esperar DB si está configurada
 if [ -n "${DB_HOST:-}" ]; then
@@ -114,7 +122,7 @@ if [ -n "${DB_HOST:-}" ]; then
   done
 fi
 
-# Preparación Laravel/Aureus (idempotente)
+# Preparación Laravel/Aureus
 php artisan key:generate --force || true
 php artisan package:discover --ansi || true
 php artisan storage:link || true
@@ -126,7 +134,7 @@ if [ "${AUREUS_AUTO_INSTALL:-false}" = "true" ]; then
   php artisan erp:install || true
 fi
 
-# Procesos opcionales
+# Procesos opcionales (si no usas workers dedicados)
 if [ "${RUN_QUEUE:-false}" = "true" ]; then
   php artisan queue:work --tries=3 --max-time=3600 & disown
 fi
@@ -136,8 +144,7 @@ fi
 
 exec "$@"
 SCRIPT
-RUN chmod +x /usr/local/bin/entrypoint.sh \
- && chown -R www-data:www-data ${APP_DIR}/storage ${APP_DIR}/bootstrap/cache
+RUN chmod +x /usr/local/bin/entrypoint.sh
 
 HEALTHCHECK --interval=30s --timeout=10s --retries=5 CMD curl -fsS http://localhost/ || exit 1
 EXPOSE 80
