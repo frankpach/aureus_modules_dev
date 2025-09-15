@@ -15,10 +15,24 @@ RUN set -eux; \
   git checkout -qf FETCH_HEAD
 
 # ========= 2) COMPOSER (vendor) =========
-FROM composer:2 AS vendor
+FROM php:8.3-cli AS vendor
+SHELL ["/bin/bash","-lc"]
+
+# Paquetes y extensiones necesarias para validar requisitos de Composer
+RUN apt-get update && apt-get install -y \
+    git unzip libzip-dev libpng-dev libjpeg-dev libfreetype6-dev libicu-dev \
+ && docker-php-ext-configure gd --with-freetype --with-jpeg \
+ && docker-php-ext-install -j"$(nproc)" zip intl gd \
+ && rm -rf /var/lib/apt/lists/*
+
+# Instalar composer (binario) tomado de la imagen oficial
+COPY --from=composer:2 /usr/bin/composer /usr/bin/composer
+
 WORKDIR /app
 COPY --from=code /src ./
-# Instala dependencias de producción según composer.json provisto
+
+# Instalar dependencias de producción (respeta lock)
+ENV COMPOSER_ALLOW_SUPERUSER=1
 RUN composer install --no-dev --prefer-dist --no-interaction --no-scripts --optimize-autoloader
 
 # ========= 3) ASSETS (Vite) =========
