@@ -1,152 +1,62 @@
-# ========= 1) CÓDIGO (clona Aureus) =========
-FROM alpine/git:latest AS code
-ARG AUREUS_REPO=https://github.com/aureuserp/aureuserp.git
-ARG AUREUS_REF=master
-WORKDIR /src
-RUN set -eux; \
-  git init; git remote add origin "${AUREUS_REPO}"; \
-  if git ls-remote --heads --tags origin "${AUREUS_REF}" | grep -q .; then \
-    echo "Using ref ${AUREUS_REF}"; git fetch --depth 1 origin "${AUREUS_REF}"; \
-  else \
-    DEFAULT_REF="$(git ls-remote --symref origin HEAD | awk '/^ref:/ {print $2}' | sed 's#refs/heads/##')"; \
-    echo "Ref ${AUREUS_REF} no existe, fallback -> ${DEFAULT_REF}"; \
-    git fetch --depth 1 origin "${DEFAULT_REF}"; \
-  fi; \
-  git checkout -qf FETCH_HEAD
+# ====== Base PHP-FPM con extensiones necesarias ======
+FROM php:8.2-fpm-bullseye
 
-# ========= 2) COMPOSER (instala vendor con extensiones) =========
-FROM php:8.3-cli AS vendor
-SHELL ["/bin/bash","-lc"]
-RUN apt-get update && apt-get install -y \
-      git unzip pkg-config libonig-dev \
-      libzip-dev libpng-dev libjpeg-dev libfreetype6-dev libicu-dev \
-  && docker-php-ext-configure gd --with-freetype --with-jpeg \
-  && docker-php-ext-install -j"$(nproc)" zip intl gd mbstring \
-  && rm -rf /var/lib/apt/lists/*
+# Args opcionales
+ARG NODE_MAJOR=20
+ARG DEBIAN_FRONTEND=noninteractive
+
+# Paquetes del sistema y extensiones PHP requeridas por Aureus (Laravel 11 + paquetes)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git curl unzip cron supervisor nginx \
+    libpq-dev libzip-dev libicu-dev libxml2-dev \
+    libpng-dev libjpeg-dev libwebp-dev libfreetype6-dev \
+    pkg-config ca-certificates gnupg \
+    && docker-php-ext-configure intl \
+    && docker-php-ext-configure gd --with-freetype --with-jpeg --with-webp \
+    && docker-php-ext-install -j$(nproc) pdo pdo_pgsql bcmath intl pcntl gd zip opcache
+
+# Redis (extensión PHP)
+RUN pecl install redis \
+    && docker-php-ext-enable redis
+
+# Composer (desde imagen oficial)
 COPY --from=composer:2 /usr/bin/composer /usr/bin/composer
-WORKDIR /app
-COPY --from=code /src ./
-ENV COMPOSER_ALLOW_SUPERUSER=1
-# Respeta composer.lock si existe en repo
-RUN composer install --no-dev --prefer-dist --no-interaction --no-scripts --optimize-autoloader
 
-# ========= 3) ASSETS (Vite build) =========
-FROM node:20 AS assets
-WORKDIR /app
-COPY --from=code /src/package*.json ./
-RUN npm ci --no-audit --no-fund || npm install
-COPY --from=code /src ./
-RUN npm run build
+# NodeJS (para build de assets cuando se requiera)
+RUN curl -fsSL https://deb.nodesource.com/setup_${NODE_MAJOR}.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs
 
-# ========= 4) RUNTIME PHP 8.3 + Apache =========
-FROM php:8.3-apache
-SHELL ["/bin/bash","-lc"]
+# Limpieza
+RUN rm -rf /var/lib/apt/lists/*
 
-# Paths y docroot
-ARG APP_DIR=/var/www/html/code
-ENV APP_DIR=${APP_DIR}
-ENV APACHE_DOCUMENT_ROOT=${APP_DIR}/public
-ENV COMPOSER_ALLOW_SUPERUSER=1
-
-# Extensiones requeridas por Laravel/Aureus + PGSQL + Redis
-RUN apt-get update && apt-get install -y \
-      git unzip curl pkg-config libonig-dev \
-      libzip-dev libpng-dev libjpeg-dev libfreetype6-dev libicu-dev libpq-dev \
-  && docker-php-ext-configure gd --with-freetype --with-jpeg \
-  && docker-php-ext-install -j"$(nproc)" pdo_pgsql bcmath intl zip gd exif mbstring opcache \
-  && pecl install redis \
-  && docker-php-ext-enable redis \
-  && a2enmod rewrite headers \
-  && sed -ri -e 's!/var/www/html!${APACHE_DOCUMENT_ROOT}!g' \
-       /etc/apache2/sites-available/*.conf /etc/apache2/apache2.conf /etc/apache2/conf-available/*.conf \
-  && rm -rf /var/lib/apt/lists/*
-
-# Opcache (seguro en prod)
-RUN printf "\nopcache.enable=1\nopcache.enable_cli=1\nopcache.validate_timestamps=0\nopcache.max_accelerated_files=20000\nopcache.memory_consumption=256\nopcache.interned_strings_buffer=16\n" > /usr/local/etc/php/conf.d/opcache-recommended.ini
-
-# Código + vendor + assets
+# ====== Estructura y configs ======
+# Directorio de la app (código se montará como volumen)
+ENV APP_DIR=/var/www/aureus
+RUN mkdir -p ${APP_DIR}
 WORKDIR ${APP_DIR}
-COPY --from=code   /src               ${APP_DIR}
-COPY --from=vendor /app/vendor        ${APP_DIR}/vendor
-COPY --from=assets /app/public/build  ${APP_DIR}/public/build
 
-# ===== Entrypoint (idempotente) =====
-RUN set -eux && cat > /usr/local/bin/entrypoint.sh <<'SCRIPT'
-#!/usr/bin/env bash
-set -e
+# Nginx config
+RUN rm -f /etc/nginx/sites-enabled/default
+COPY ./infra/nginx.conf /etc/nginx/nginx.conf
+COPY ./infra/nginx-site.conf /etc/nginx/conf.d/aureus.conf
 
-APP_DIR="${APP_DIR:-/var/www/html/code}"
-cd "$APP_DIR"
+# PHP-FPM tuning opcional
+COPY ./infra/php-fpm.ini /usr/local/etc/php/conf.d/zz-custom.ini
 
-# Si no existe .env, copiar base
-[ -f .env ] || cp .env.example .env
+# Supervisor: php-fpm, nginx, queue, scheduler
+COPY ./infra/supervisor.conf /etc/supervisor/conf.d/supervisor.conf
 
-# Inyectar/actualizar variables desde entorno
-php -r '
-$env = file_exists(".env") ? file_get_contents(".env") : "";
-function putenvline($k,$v){ global $env; $k=trim($k); $v=str_replace(["\n","\r"],"",$v); if(preg_match("/^$k=/m",$env)){ $env=preg_replace("/^$k=.*$/m","$k=$v",$env);} else { $env .= PHP_EOL."$k=$v";}}
-$map=[
- "APP_ENV"=>getenv("APP_ENV")?: "production",
- "APP_URL"=>getenv("APP_URL")?: "http://localhost",
- "APP_DEBUG"=>(getenv("APP_DEBUG")?: "false"),
- "DB_CONNECTION"=>getenv("DB_CONNECTION")?: "pgsql",
- "DB_HOST"=>getenv("DB_HOST")?: "127.0.0.1",
- "DB_PORT"=>getenv("DB_PORT")?: "5432",
- "DB_DATABASE"=>getenv("DB_DATABASE")?: "aureus",
- "DB_USERNAME"=>getenv("DB_USERNAME")?: "aureus",
- "DB_PASSWORD"=>getenv("DB_PASSWORD")?: "aureus",
- "CACHE_DRIVER"=>getenv("CACHE_DRIVER")?: "redis",
- "QUEUE_CONNECTION"=>getenv("QUEUE_CONNECTION")?: "redis",
- "REDIS_CLIENT"=>getenv("REDIS_CLIENT")?: "phpredis",
- "REDIS_HOST"=>getenv("REDIS_HOST")?: "127.0.0.1",
- "REDIS_PORT"=>getenv("REDIS_PORT")?: "6379",
- "REDIS_PASSWORD"=>getenv("REDIS_PASSWORD")?: ""
-];
-foreach($map as $k=>$v){ putenvline($k,$v); }
-file_put_contents(".env",$env);
-';
-
-# Permisos (por si el volumen entra vacío)
-chown -R www-data:www-data storage bootstrap/cache || true
-
-# Esperar DB si está configurada
-if [ -n "${DB_HOST:-}" ]; then
-  echo "Waiting for DB ${DB_HOST}:${DB_PORT:-5432}..."
-  for i in $(seq 1 90); do
-    if php -r 'try{$c=new PDO("pgsql:host=".getenv("DB_HOST").";port=".getenv("DB_PORT").";dbname=".getenv("DB_DATABASE"), getenv("DB_USERNAME"), getenv("DB_PASSWORD")); exit(0);}catch(Exception $e){exit(1);}'; then
-      echo "DB reachable."
-      break
-    else
-      sleep 2
-    fi
-  done
-fi
-
-# Preparación Laravel/Aureus
-php artisan key:generate --force || true
-php artisan package:discover --ansi || true
-php artisan storage:link || true
-php artisan migrate --force || true
-php artisan optimize || true
-
-# Instalación Aureus (opcional)
-if [ "${AUREUS_AUTO_INSTALL:-false}" = "true" ]; then
-  php artisan erp:install || true
-fi
-
-# Procesos opcionales (si no usas workers dedicados)
-if [ "${RUN_QUEUE:-false}" = "true" ]; then
-  php artisan queue:work --tries=3 --max-time=3600 & disown
-fi
-if [ "${RUN_SCHEDULE:-false}" = "true" ]; then
-  php artisan schedule:work & disown
-fi
-
-exec "$@"
-SCRIPT
+# Entrypoint: instala dependencias, prepara .env, permisos, cachea y lanza procesos
+COPY ./infra/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
-HEALTHCHECK --interval=30s --timeout=10s --retries=5 CMD curl -fsS http://localhost/ || exit 1
-EXPOSE 80
+# Permisos para Laravel
+RUN usermod -u 1000 www-data && groupmod -g 1000 www-data || true
+RUN chown -R www-data:www-data ${APP_DIR}
+
+EXPOSE 8080
+HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=5 \
+  CMD curl -fsS http://127.0.0.1:8080/ || exit 1
+
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
-CMD ["apache2-foreground"]
+CMD ["/usr/bin/supervisord","-c","/etc/supervisor/supervisord.conf","-n"]
