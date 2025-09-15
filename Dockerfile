@@ -42,7 +42,7 @@ RUN apt-get update && apt-get upgrade -y && \
       php8.4 php8.4-fpm php8.4-cli php8.4-common \
       php8.4-xml php8.4-mbstring php8.4-curl php8.4-gd \
       php8.4-intl php8.4-zip php8.4-bcmath php8.4-pgsql \
-      php8.4-readline php8.4-opcache php8.4-pcntl php8.4-redis && \
+      php8.4-readline php8.4-opcache php8.4-redis && \
     curl -sS https://getcomposer.org/installer -o /tmp/composer-setup.php && \
     php /tmp/composer-setup.php --install-dir=/usr/local/bin --filename=composer && \
     rm -f /tmp/composer-setup.php && \
