@@ -37,6 +37,7 @@ APP_ENV=production
 APP_DEBUG=false
 APP_URL=https://aureus-prod.qpppgy.easypanel.host
 SESSION_SECURE_COOKIE=true
+TRUSTED_PROXIES=*
 APP_KEY=base64:LXUQWoVycEYjPWeXhH+pg1rB26gZElO1l9JAMsIz7nw=
 
 DB_CONNECTION=pgsql
