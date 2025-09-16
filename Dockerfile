@@ -36,7 +36,6 @@ RUN apt-get update && apt-get upgrade -y && \
       libzip4 zip \
       libicu-dev \
       libpng-dev libjpeg-turbo8-dev libfreetype6-dev libwebp-dev \
-      libpq-dev && \
       libpq-dev libmysqlclient-dev && \
     add-apt-repository ppa:ondrej/php -y && apt-get update && \
     apt-get install -y --no-install-recommends \
